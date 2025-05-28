@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
+mod dhcpv6;
+
 use std::str::FromStr;
 
 use mozim::{DhcpV4Client, DhcpV4Config, DhcpV4Lease};
@@ -9,35 +11,39 @@ use nispor::{
     RouteConf, RouteProtocol,
 };
 
+use self::dhcpv6::{run_dhcpv6_cli, ARG_DISPATCH, ARG_IS_PD, ARG_IS_TA};
+
 const DEFAULT_METRIC: u32 = 500;
 const POLL_WAIT_TIME: u32 = 5;
 const APP_NAME: &str = "mzc";
 
 const SUBCOMMAND_RUN: &str = "run";
+const SUBCOMMAND_RUN6: &str = "run6";
 const SUBCOMMAND_PROXY: &str = "proxy";
 const SUBCOMMAND_CLEAN: &str = "clean";
 const SUBCOMMAND_VERSION: &str = "version";
-const IFNAME: &str = "ifname";
+pub(crate) const IFNAME: &str = "ifname";
 const ARG_TIMEOUT: &str = "timeout";
 const ARG_MAC: &str = "mac";
 const DEFAULT_TIMEOUT_STR: &str = "480";
+const ARG_SYSLOG: &str = "syslog";
 
 fn main() {
-    env_logger::Builder::new()
-        .filter(Some("nispor"), log::LevelFilter::Debug)
-        .filter(Some("mozim"), log::LevelFilter::Debug)
-        .filter(Some("mzc"), log::LevelFilter::Debug)
-        .init();
-
     let matches = clap::Command::new(APP_NAME)
         .version(clap::crate_version!())
         .author("Gris Ge <fge@redhat.com>")
         .about("Command line of mozim")
         .subcommand_required(true)
+        .arg(
+            clap::Arg::new(ARG_SYSLOG)
+                .long(ARG_SYSLOG)
+                .global(true)
+                .action(clap::ArgAction::SetTrue),
+        )
         .subcommand(
             clap::Command::new(SUBCOMMAND_RUN)
                 .alias("r")
-                .about("Run DHCP Client")
+                .about("Run DHCPv4 Client")
                 .arg(
                     clap::Arg::new(IFNAME)
                         .index(1)
@@ -105,11 +111,51 @@ fn main() {
                 ),
         )
         .subcommand(
+            clap::Command::new(SUBCOMMAND_RUN6)
+                .alias("r6")
+                .about("Run DHCPv6 Client")
+                .arg(
+                    clap::Arg::new(IFNAME)
+                        .index(1)
+                        .help("Interface name")
+                        .action(clap::ArgAction::Set)
+                        .value_parser(
+                            clap::builder::NonEmptyStringValueParser::new(),
+                        ),
+                )
+                .arg(
+                    clap::Arg::new(ARG_IS_PD)
+                        .long(ARG_IS_PD)
+                        .help("Request DHCPv6 prefix delegation only")
+                        .action(clap::ArgAction::SetTrue),
+                )
+                .arg(
+                    clap::Arg::new(ARG_IS_TA)
+                        .long(ARG_IS_TA)
+                        .help("Request DHCPv6 temporary addresses only")
+                        .action(clap::ArgAction::SetTrue),
+                )
+                .arg(
+                    clap::Arg::new(ARG_DISPATCH)
+                        .long(ARG_DISPATCH)
+                        .help(
+                            "Dispatch script path, only for prefix delegation",
+                        )
+                        .action(clap::ArgAction::Set),
+                ),
+        )
+        .subcommand(
             clap::Command::new(SUBCOMMAND_VERSION)
                 .alias("v")
                 .about("Show version"),
         )
         .get_matches();
+
+    if *matches.get_one(ARG_SYSLOG).unwrap() {
+        init_syslog_logger()
+    } else {
+        init_env_logger()
+    }
 
     if let Some(matches) = matches.subcommand_matches(SUBCOMMAND_RUN) {
         let timeout: u32 = *matches.get_one(ARG_TIMEOUT).unwrap();
@@ -123,6 +169,8 @@ fn main() {
     } else if let Some(matches) = matches.subcommand_matches(SUBCOMMAND_CLEAN) {
         let iface_name: &String = matches.get_one(IFNAME).unwrap();
         purge_dhcp_ip_route(iface_name);
+    } else if let Some(matches) = matches.subcommand_matches(SUBCOMMAND_RUN6) {
+        run_dhcpv6_cli(matches);
     } else if matches.subcommand_matches(SUBCOMMAND_VERSION).is_some() {
         println!("{} {}", APP_NAME, clap::crate_version!());
     }
@@ -307,4 +355,26 @@ fn proxy(iface_name: &str, mac: &str, timeout: u32) {
             }
         }
     }
+}
+
+fn init_env_logger() {
+    env_logger::Builder::new()
+        .filter(Some("nispor"), log::LevelFilter::Debug)
+        .filter(Some("mozim"), log::LevelFilter::Debug)
+        .filter(Some("mzc"), log::LevelFilter::Debug)
+        .init();
+}
+
+fn init_syslog_logger() {
+    let formatter = syslog::Formatter3164 {
+        facility: syslog::Facility::LOG_USER,
+        hostname: None,
+        process: "mzc".into(),
+        pid: 0,
+    };
+
+    let logger = syslog::unix(formatter).expect("could not connect to syslog");
+    log::set_boxed_logger(Box::new(syslog::BasicLogger::new(logger)))
+        .map(|()| log::set_max_level(log::LevelFilter::Debug))
+        .expect("Failed to setup syslog logger");
 }
